@@ -1,0 +1,75 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: pod-delete-engine
+  namespace: default               # namespace of the target application
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    experiment: pod-delete
+spec:
+  # Target application
+  appinfo:
+    appns: default
+    applabel: "app.kubernetes.io/name=frontend"
+    appkind: deployment
+
+  # Chaos runner configuration
+  chaosServiceAccount: chaos-runner
+  engineState: active
+
+  # Abort if steady-state validation fails
+  terminationGracePeriodSeconds: 30
+
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            - name: CHAOS_INTERVAL
+              value: "15"
+            - name: PODS_AFFECTED_PERC
+              value: "50"
+            - name: FORCE
+              value: "false"
+
+        # Steady-state hypothesis probes
+        probe:
+          # HTTP probe: check service remains responsive during chaos
+          - name: check-frontend-availability
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 3000     # ms
+              interval: 2            # seconds between checks
+              attempt: 3
+              probePollingInterval: 2
+              initialDelaySeconds: 5
+              stopOnFailure: true    # abort experiment if service goes down
+            httpProbe/inputs:
+              url: http://frontend.default.svc.cluster.local/healthz
+              insecureSkipVerify: false
+              method:
+                get:
+                  criteria: ==
+                  responseCode: "200"
+
+          # Prometheus probe: check error rate stays below threshold
+          - name: check-error-rate
+            type: promProbe
+            mode: Edge
+            runProperties:
+              probeTimeout: 3000
+              interval: 5
+              attempt: 3
+              stopOnFailure: false   # warn but don't abort
+            promProbe/inputs:
+              endpoint: http://prometheus.monitoring.svc.cluster.local:9090
+              query: >
+                sum(rate(http_requests_total{status=~"5..",app="frontend"}[1m]))
+                /
+                sum(rate(http_requests_total{app="frontend"}[1m]))
+              comparator:
+                criteria: <=
+                value: "0.05"        # SLO: error rate <= 5%
