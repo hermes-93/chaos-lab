@@ -1,0 +1,92 @@
+---
+# Service account for the chaos operator
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litmus-chaos-operator
+  namespace: litmus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: litmus-chaos-operator
+rules:
+  # Core resources for chaos injection
+  - apiGroups: [""]
+    resources: [pods, pods/exec, pods/log, pods/eviction]
+    verbs: [get, list, watch, create, delete, patch, update]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [""]
+    resources: [services, endpoints, namespaces, events, configmaps]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list]
+  # App resources
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets, daemonsets]
+    verbs: [get, list, watch, patch, update]
+  # Batch / jobs
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete, patch, update]
+  # LitmusChaos CRDs
+  - apiGroups: [litmuschaos.io]
+    resources: ["*"]
+    verbs: ["*"]
+  # Leader election
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litmus-chaos-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: litmus-chaos-operator
+subjects:
+  - kind: ServiceAccount
+    name: litmus-chaos-operator
+    namespace: litmus
+---
+# Per-namespace service account for chaos runner pods
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chaos-runner
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chaos-runner
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/exec, pods/log]
+    verbs: [get, list, watch, create, delete, patch]
+  - apiGroups: [litmuschaos.io]
+    resources: [chaosengines, chaosexperiments, chaosresults]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chaos-runner
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chaos-runner
+subjects:
+  - kind: ServiceAccount
+    name: chaos-runner
+    namespace: default
