@@ -1,0 +1,234 @@
+---
+# SLO definitions for chaos-lab target services
+# Prometheus PrometheusRule — apply to monitoring namespace
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: chaos-lab-slos
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    prometheus: kube-prometheus
+    role: alert-rules
+
+spec:
+  groups:
+
+    # ── Frontend SLOs ──────────────────────────────────────────────────────────
+    - name: slo.frontend.availability
+      interval: 30s
+      rules:
+        # 5-minute burn rate: error ratio
+        - record: job:frontend_error_rate:ratio_rate5m
+          expr: |
+            sum(rate(http_requests_total{app="frontend",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{app="frontend"}[5m]))
+
+        # 1-hour burn rate
+        - record: job:frontend_error_rate:ratio_rate1h
+          expr: |
+            sum(rate(http_requests_total{app="frontend",status=~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total{app="frontend"}[1h]))
+
+        # 6-hour burn rate
+        - record: job:frontend_error_rate:ratio_rate6h
+          expr: |
+            sum(rate(http_requests_total{app="frontend",status=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{app="frontend"}[6h]))
+
+        # SLO: 99.5% availability (error budget = 0.5%)
+        - alert: FrontendSLOBurnRateFast
+          expr: |
+            job:frontend_error_rate:ratio_rate5m  > (14.4 * 0.005)
+            and
+            job:frontend_error_rate:ratio_rate1h  > (14.4 * 0.005)
+          for: 2m
+          labels:
+            severity: critical
+            slo: availability
+            service: frontend
+          annotations:
+            summary: "Frontend fast burn — error budget exhausting in ~1h"
+            description: >
+              Current 5m error rate {{ $value | humanizePercentage }}
+              exceeds 14.4× the SLO budget. At this rate the 30-day error
+              budget will be consumed within ~1 hour.
+
+        - alert: FrontendSLOBurnRateSlow
+          expr: |
+            job:frontend_error_rate:ratio_rate1h  > (6 * 0.005)
+            and
+            job:frontend_error_rate:ratio_rate6h  > (6 * 0.005)
+          for: 15m
+          labels:
+            severity: warning
+            slo: availability
+            service: frontend
+          annotations:
+            summary: "Frontend slow burn — error budget at risk"
+            description: >
+              Current 1h error rate {{ $value | humanizePercentage }}
+              exceeds 6× the SLO budget.
+
+    - name: slo.frontend.latency
+      interval: 30s
+      rules:
+        # p95 latency recording rules
+        - record: job:frontend_latency_p95:rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{app="frontend"}[5m])) by (le)
+            )
+
+        - record: job:frontend_latency_p99:rate5m
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{app="frontend"}[5m])) by (le)
+            )
+
+        # SLO: p95 < 300ms
+        - alert: FrontendLatencyP95High
+          expr: job:frontend_latency_p95:rate5m > 0.3
+          for: 5m
+          labels:
+            severity: warning
+            slo: latency
+            service: frontend
+          annotations:
+            summary: "Frontend p95 latency breaching SLO (300ms)"
+            description: "p95={{ $value | humanizeDuration }}"
+
+        # SLO: p99 < 1s
+        - alert: FrontendLatencyP99High
+          expr: job:frontend_latency_p99:rate5m > 1.0
+          for: 5m
+          labels:
+            severity: critical
+            slo: latency
+            service: frontend
+          annotations:
+            summary: "Frontend p99 latency breaching SLO (1s)"
+            description: "p99={{ $value | humanizeDuration }}"
+
+    # ── Backend SLOs ───────────────────────────────────────────────────────────
+    - name: slo.backend.availability
+      interval: 30s
+      rules:
+        - record: job:backend_error_rate:ratio_rate5m
+          expr: |
+            sum(rate(http_requests_total{app="backend",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{app="backend"}[5m]))
+
+        - record: job:backend_error_rate:ratio_rate1h
+          expr: |
+            sum(rate(http_requests_total{app="backend",status=~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total{app="backend"}[1h]))
+
+        - record: job:backend_error_rate:ratio_rate6h
+          expr: |
+            sum(rate(http_requests_total{app="backend",status=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{app="backend"}[6h]))
+
+        # SLO: 99.9% availability (error budget = 0.1%)
+        - alert: BackendSLOBurnRateFast
+          expr: |
+            job:backend_error_rate:ratio_rate5m  > (14.4 * 0.001)
+            and
+            job:backend_error_rate:ratio_rate1h  > (14.4 * 0.001)
+          for: 2m
+          labels:
+            severity: critical
+            slo: availability
+            service: backend
+          annotations:
+            summary: "Backend fast burn — error budget exhausting in ~1h"
+            description: >
+              5m error rate {{ $value | humanizePercentage }}.
+              Budget exhausted in ~1h at current rate.
+
+        - alert: BackendSLOBurnRateSlow
+          expr: |
+            job:backend_error_rate:ratio_rate1h  > (6 * 0.001)
+            and
+            job:backend_error_rate:ratio_rate6h  > (6 * 0.001)
+          for: 15m
+          labels:
+            severity: warning
+            slo: availability
+            service: backend
+          annotations:
+            summary: "Backend slow burn — error budget at risk"
+            description: "1h error rate {{ $value | humanizePercentage }}"
+
+    - name: slo.backend.latency
+      interval: 30s
+      rules:
+        - record: job:backend_latency_p95:rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{app="backend"}[5m])) by (le)
+            )
+
+        - record: job:backend_latency_p99:rate5m
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{app="backend"}[5m])) by (le)
+            )
+
+        # SLO: p95 < 200ms
+        - alert: BackendLatencyP95High
+          expr: job:backend_latency_p95:rate5m > 0.2
+          for: 5m
+          labels:
+            severity: warning
+            slo: latency
+            service: backend
+          annotations:
+            summary: "Backend p95 latency breaching SLO (200ms)"
+            description: "p95={{ $value | humanizeDuration }}"
+
+        # SLO: p99 < 500ms
+        - alert: BackendLatencyP99High
+          expr: job:backend_latency_p99:rate5m > 0.5
+          for: 5m
+          labels:
+            severity: critical
+            slo: latency
+            service: backend
+          annotations:
+            summary: "Backend p99 latency breaching SLO (500ms)"
+            description: "p99={{ $value | humanizeDuration }}"
+
+    # ── Chaos experiment alerts ────────────────────────────────────────────────
+    - name: chaos.experiment.health
+      rules:
+        - alert: ChaosExperimentFailed
+          expr: |
+            litmuschaos_experiment_verdict{verdict="Fail"} == 1
+          for: 0m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Chaos experiment {{ $labels.chaosengine_name }} failed"
+            description: >
+              Experiment {{ $labels.chaosexperiment_name }} in namespace
+              {{ $labels.namespace }} reported a FAIL verdict.
+              The system may not be meeting its resilience requirements.
+
+        - alert: ChaosEnginePodMissing
+          expr: |
+            kube_pod_info{namespace="litmus"} == 0
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "LitmusChaos operator pod is missing"
+            description: "No pods found in litmus namespace for 10+ minutes."
