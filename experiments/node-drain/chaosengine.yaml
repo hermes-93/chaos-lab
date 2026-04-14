@@ -1,0 +1,66 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: node-drain-engine
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    experiment: node-drain
+    blast-radius: high          # high blast radius — annotated for awareness
+spec:
+  appinfo:
+    appns: default
+    applabel: "app.kubernetes.io/name=frontend"
+    appkind: deployment
+
+  chaosServiceAccount: chaos-runner
+  engineState: active
+
+  # Longer grace period for node-level experiments
+  terminationGracePeriodSeconds: 120
+
+  experiments:
+    - name: node-drain
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "180"
+            - name: TARGET_NODE
+              value: ""            # leave empty to auto-select a non-master node
+            - name: DRAIN_TIMEOUT
+              value: "90"          # seconds to wait for drain to complete
+
+        probe:
+          # Service must remain available throughout node drain
+          - name: check-frontend-availability
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 5
+              attempt: 3
+              stopOnFailure: true
+            httpProbe/inputs:
+              url: http://frontend.default.svc.cluster.local/healthz
+              method:
+                get:
+                  criteria: ==
+                  responseCode: "200"
+
+          # Validate PDB is respected (minAvailable pods remain)
+          - name: check-min-replicas
+            type: promProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 10
+              attempt: 3
+              stopOnFailure: true
+            promProbe/inputs:
+              endpoint: http://prometheus.monitoring.svc.cluster.local:9090
+              query: >
+                kube_deployment_status_replicas_available{deployment="frontend",namespace="default"}
+              comparator:
+                criteria: ">="
+                value: "2"   # PDB: minAvailable=2
