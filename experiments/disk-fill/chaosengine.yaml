@@ -1,0 +1,72 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: disk-fill-engine
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    experiment: disk-fill
+spec:
+  appinfo:
+    appns: default
+    applabel: "app.kubernetes.io/name=backend"
+    appkind: statefulset
+
+  chaosServiceAccount: chaos-runner
+  engineState: active
+
+  experiments:
+    - name: disk-fill
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "120"
+            - name: FILL_PERCENTAGE
+              value: "90"          # fill disk to 90%
+            - name: EPHEMERAL_STORAGE_MEBIBYTES
+              value: ""            # auto-detect from container limits
+            - name: DATA_BLOCK_SIZE
+              value: "256"         # KB per write block
+            - name: CONTAINER_PATH
+              value: /var/data
+            - name: PODS_AFFECTED_PERC
+              value: "25"          # conservative for stateful workloads
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock
+
+        probe:
+          - name: check-service-writes
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 10
+              attempt: 3
+              stopOnFailure: true
+            httpProbe/inputs:
+              url: http://backend.default.svc.cluster.local/healthz
+              method:
+                get:
+                  criteria: ==
+                  responseCode: "200"
+
+          # Check application handles disk-full gracefully (no crash loop)
+          - name: check-no-crashloop
+            type: k8sProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 15
+              attempt: 3
+              stopOnFailure: true
+            k8sProbe/inputs:
+              group: ""
+              version: v1
+              resource: pods
+              namespace: default
+              fieldSelector: "status.phase=Running"
+              labelSelector: "app.kubernetes.io/name=backend"
+              operation: present
