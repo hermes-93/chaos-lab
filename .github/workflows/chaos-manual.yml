@@ -1,0 +1,214 @@
+name: Manual Chaos Experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      experiment:
+        description: "Experiment to run"
+        required: true
+        type: choice
+        options:
+          - pod-delete
+          - network-latency
+          - cpu-stress
+          - disk-fill
+          - node-drain
+      namespace:
+        description: "Target namespace"
+        required: true
+        default: "default"
+        type: string
+      target_service:
+        description: "Target service (frontend or backend)"
+        required: true
+        type: choice
+        options:
+          - frontend
+          - backend
+      skip_steady_state:
+        description: "Skip pre-flight steady state check (dangerous)"
+        required: false
+        default: "false"
+        type: boolean
+      dry_run:
+        description: "Dry run — print plan without executing"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pre-flight:
+    name: Pre-flight Checks
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      healthy: ${{ steps.check.outputs.healthy }}
+      approved: ${{ steps.check.outputs.approved }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Print experiment plan
+        run: |
+          echo "════════════════════════════════════════"
+          echo "  CHAOS EXPERIMENT PLAN"
+          echo "════════════════════════════════════════"
+          echo "  Experiment  : ${{ inputs.experiment }}"
+          echo "  Namespace   : ${{ inputs.namespace }}"
+          echo "  Target      : ${{ inputs.target_service }}"
+          echo "  Dry run     : ${{ inputs.dry_run }}"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "  Run ID      : ${{ github.run_id }}"
+          echo "════════════════════════════════════════"
+
+      - name: Check steady state
+        id: check
+        if: inputs.skip_steady_state != 'true'
+        run: |
+          chmod +x scripts/check-steady-state.sh
+          if ./scripts/check-steady-state.sh ${{ inputs.target_service }}; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip steady state (override)
+        if: inputs.skip_steady_state == 'true'
+        run: |
+          echo "⚠️  Steady state check SKIPPED by operator request."
+          echo "healthy=true" >> "$GITHUB_OUTPUT"
+
+      - name: Abort if unhealthy
+        if: steps.check.outputs.healthy == 'false'
+        run: |
+          echo "❌ System not in steady state. Aborting."
+          echo "  Use skip_steady_state=true to override (dangerous)."
+          exit 1
+
+  run-experiment:
+    name: "Run: ${{ inputs.experiment }}"
+    runs-on: ubuntu-latest
+    needs: pre-flight
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Dry run — print manifest
+        if: inputs.dry_run == 'true'
+        run: |
+          echo "DRY RUN — would apply:"
+          cat experiments/${{ inputs.experiment }}/chaosengine.yaml
+          echo ""
+          echo "Exiting without making changes."
+
+      - name: Apply ChaosEngine
+        if: inputs.dry_run != 'true'
+        id: apply
+        run: |
+          chmod +x scripts/run-experiment.sh
+          ./scripts/run-experiment.sh \
+            "${{ inputs.experiment }}" \
+            "${{ inputs.namespace }}" \
+            "${{ inputs.target_service }}" \
+            2>&1 | tee experiment-${{ inputs.experiment }}.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Stream experiment status
+        if: inputs.dry_run != 'true'
+        run: |
+          ENGINE="${{ inputs.experiment }}-engine"
+          echo "Watching ChaosEngine: $ENGINE"
+          for i in $(seq 1 24); do
+            STATUS=$(kubectl get chaosengine "$ENGINE" -n "${{ inputs.namespace }}" \
+              -o jsonpath='{.status.engineStatus}' 2>/dev/null || echo "unknown")
+            echo "  [$(date -u +%H:%M:%S)] engineStatus=$STATUS"
+            [ "$STATUS" = "completed" ] || [ "$STATUS" = "stopped" ] && break
+            sleep 15
+          done
+
+      - name: Collect ChaosResult
+        if: inputs.dry_run != 'true' && always()
+        run: |
+          RESULT_NAME="${{ inputs.experiment }}-engine-${{ inputs.experiment }}"
+          kubectl get chaosresult "$RESULT_NAME" \
+            -n "${{ inputs.namespace }}" \
+            -o jsonpath='{.status.experimentStatus}' 2>/dev/null \
+          || echo "No ChaosResult found (experiment may still be running)"
+
+      - name: Upload log
+        if: inputs.dry_run != 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-${{ inputs.experiment }}-${{ github.run_id }}
+          path: experiment-${{ inputs.experiment }}.log
+          retention-days: 30
+
+  verify-recovery:
+    name: Verify Recovery
+    runs-on: ubuntu-latest
+    needs: run-experiment
+    if: inputs.dry_run != 'true' && always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Wait for system to stabilise
+        run: |
+          echo "Waiting 60s for system to settle after chaos..."
+          sleep 60
+
+      - name: Verify steady state restored
+        id: recovery
+        run: |
+          chmod +x scripts/check-steady-state.sh
+          ./scripts/check-steady-state.sh ${{ inputs.target_service }}
+
+      - name: Create incident issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔥 Recovery failure after manual ${context.payload.inputs.experiment} (run #${context.runId})`,
+              body: [
+                `## Manual Chaos Recovery Failure`,
+                ``,
+                `| Field | Value |`,
+                `|-------|-------|`,
+                `| **Experiment** | \`${{ inputs.experiment }}\` |`,
+                `| **Target** | \`${{ inputs.target_service }}\` in \`${{ inputs.namespace }}\` |`,
+                `| **Triggered by** | @${{ github.actor }} |`,
+                `| **Run** | ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId} |`,
+                `| **Date** | ${new Date().toISOString()} |`,
+                ``,
+                `The system did not return to steady state after the experiment.`,
+                ``,
+                `**Immediate action**: check pod status and recent events in the \`${{ inputs.namespace }}\` namespace.`,
+              ].join('\n'),
+              labels: ['chaos', 'incident', 'P1']
+            })
