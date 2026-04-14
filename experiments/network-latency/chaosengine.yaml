@@ -1,0 +1,73 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: network-latency-engine
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    experiment: network-latency
+spec:
+  appinfo:
+    appns: default
+    applabel: "app.kubernetes.io/name=backend"
+    appkind: deployment
+
+  chaosServiceAccount: chaos-runner
+  engineState: active
+
+  experiments:
+    - name: pod-network-latency
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "120"
+            - name: NETWORK_LATENCY
+              value: "200"       # ms of added latency
+            - name: JITTER
+              value: "50"        # ms of jitter (realistic network variance)
+            - name: NETWORK_INTERFACE
+              value: eth0
+            - name: PODS_AFFECTED_PERC
+              value: "50"
+            - name: TARGET_CONTAINER
+              value: backend
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock
+
+        probe:
+          # Check p99 latency stays below SLO during fault injection
+          - name: check-api-latency-slo
+            type: promProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 10
+              attempt: 3
+              stopOnFailure: true
+            promProbe/inputs:
+              endpoint: http://prometheus.monitoring.svc.cluster.local:9090
+              query: >
+                histogram_quantile(0.99,
+                  sum(rate(http_request_duration_seconds_bucket{app="backend"}[2m])) by (le)
+                )
+              comparator:
+                criteria: <=
+                value: "1.0"   # SLO: p99 <= 1s (2x normal under 200ms fault)
+
+          - name: check-availability
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 5
+              attempt: 3
+              stopOnFailure: false
+            httpProbe/inputs:
+              url: http://backend.default.svc.cluster.local/ready
+              method:
+                get:
+                  criteria: ==
+                  responseCode: "200"
