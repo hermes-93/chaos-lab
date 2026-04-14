@@ -1,0 +1,41 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: pod-delete
+  namespace: litmus
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    chaos.type: pod
+spec:
+  definition:
+    scope: Namespaced
+    permissions:
+      - apiGroups: [""]
+        resources: [pods, pods/exec, pods/log, events]
+        verbs: [create, list, get, patch, update, delete, deletecollection]
+      - apiGroups: [litmuschaos.io]
+        resources: [chaosengines, chaosexperiments, chaosresults]
+        verbs: [create, list, get, patch, update]
+    image: litmuschaos/go-runner:3.7.0
+    imagePullPolicy: IfNotPresent
+    args:
+      - -c
+      - ./experiments -name pod-delete
+    command:
+      - /bin/bash
+    env:
+      - name: TOTAL_CHAOS_DURATION
+        value: "60"          # seconds the experiment runs
+      - name: CHAOS_INTERVAL
+        value: "15"          # seconds between pod deletions
+      - name: FORCE
+        value: "false"       # graceful delete
+      - name: PODS_AFFECTED_PERC
+        value: "50"          # max 50% of matching pods
+      - name: TARGET_CONTAINER
+        value: ""            # empty = target first container
+      - name: SEQUENCE
+        value: parallel      # parallel or serial
+    labels:
+      name: pod-delete
+      app.kubernetes.io/part-of: litmus
