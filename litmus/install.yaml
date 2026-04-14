@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litmus
+  labels:
+    app.kubernetes.io/name: litmus
+    app.kubernetes.io/version: "3.7.0"
+---
+# LitmusChaos operator — manages ChaosEngine lifecycle
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-operator
+  namespace: litmus
+  labels:
+    app: chaos-operator
+    app.kubernetes.io/name: litmus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chaos-operator
+  template:
+    metadata:
+      labels:
+        app: chaos-operator
+    spec:
+      serviceAccountName: litmus-chaos-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+      containers:
+        - name: chaos-operator
+          image: litmuschaos/chaos-operator:3.7.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /manager
+          args:
+            - --leader-elect
+          env:
+            - name: WATCH_NAMESPACE
+              value: ""   # watch all namespaces
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPERATOR_NAME
+              value: chaos-operator
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+# ChaosHub — community chaos experiments library
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosHub
+metadata:
+  name: community-hub
+  namespace: litmus
+spec:
+  repoURL: https://github.com/litmuschaos/chaos-charts
+  repoBranch: master
+  projectID: ""
+  hubType: git
