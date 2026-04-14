@@ -1,0 +1,6 @@
+kubeconfig
+kubeconfig.*
+*.secret.yaml
+.env
+results/
+*.log
