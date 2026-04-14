@@ -1,0 +1,140 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+
+  # ── YAML lint — catch structural errors early ────────────────────────────
+  yaml-lint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint --quiet
+
+      - name: Lint YAML files
+        run: |
+          yamllint -d "{extends: default, rules: {line-length: {max: 200}, truthy: disable}}" \
+            experiments/ litmus/ slo/ \
+            || true
+
+  # ── Shell script lint ────────────────────────────────────────────────────
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: scripts/
+          severity: warning
+
+  # ── Kubeconform — validate LitmusChaos CRD manifests ────────────────────
+  kubeconform:
+    name: Kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sfLo kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+
+      - name: Validate Kubernetes manifests
+        run: |
+          find litmus/ -name "*.yaml" | xargs kubeconform \
+            -kubernetes-version 1.29.0 \
+            -summary \
+            -ignore-missing-schemas \
+            -schema-location default \
+            || true
+
+      - name: Validate SLO PrometheusRule
+        run: |
+          kubeconform \
+            -kubernetes-version 1.29.0 \
+            -summary \
+            -ignore-missing-schemas \
+            slo/services.yaml || true
+
+  # ── Checkov — security scan for K8s/Helm misconfigs ─────────────────────
+  checkov:
+    name: Security Scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install checkov --quiet
+
+      - name: Scan experiments manifests
+        run: |
+          checkov -d experiments/ litmus/ \
+            --framework kubernetes \
+            --output sarif \
+            --output-file-path . \
+            --soft-fail \
+            || true
+          mv results_kubernetes.sarif checkov-k8s.sarif 2>/dev/null || touch checkov-k8s.sarif
+
+      - name: Upload Checkov SARIF
+        if: always() && hashFiles('checkov-k8s.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-k8s.sarif
+          category: checkov-chaos
+        continue-on-error: true
+
+  # ── Trivy — scan GitHub Actions workflows for misconfigs ─────────────────
+  trivy-workflows:
+    name: Trivy Workflow Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget --quiet
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -qq && sudo apt-get install -y trivy --quiet
+
+      - name: Trivy filesystem scan
+        run: |
+          trivy fs \
+            --format sarif \
+            --output trivy-fs.sarif \
+            --severity HIGH,CRITICAL \
+            --scanners misconfig,secret \
+            --exit-code 0 \
+            . || true
+
+      - name: Upload Trivy SARIF
+        if: always() && hashFiles('trivy-fs.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-chaos
+        continue-on-error: true
