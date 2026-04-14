@@ -1,0 +1,70 @@
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: cpu-stress-engine
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: chaos-lab
+    experiment: cpu-stress
+spec:
+  appinfo:
+    appns: default
+    applabel: "app.kubernetes.io/name=backend"
+    appkind: deployment
+
+  chaosServiceAccount: chaos-runner
+  engineState: active
+
+  experiments:
+    - name: pod-cpu-hog
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "120"
+            - name: CPU_CORES
+              value: "2"           # number of CPU cores to stress
+            - name: CPU_LOAD
+              value: "80"          # percentage load per core
+            - name: PODS_AFFECTED_PERC
+              value: "50"
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock
+
+        probe:
+          # Validate HPA kicks in and scales out
+          - name: check-hpa-scale-out
+            type: k8sProbe
+            mode: Edge
+            runProperties:
+              probeTimeout: 30000   # HPA may take up to 30s to react
+              interval: 15
+              attempt: 5
+              stopOnFailure: false
+            k8sProbe/inputs:
+              group: autoscaling
+              version: v2
+              resource: horizontalpodautoscalers
+              namespace: default
+              fieldSelector: metadata.name=backend
+              operation: present
+
+          - name: check-latency-under-load
+            type: promProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5000
+              interval: 10
+              attempt: 3
+              stopOnFailure: true
+            promProbe/inputs:
+              endpoint: http://prometheus.monitoring.svc.cluster.local:9090
+              query: >
+                histogram_quantile(0.95,
+                  sum(rate(http_request_duration_seconds_bucket{app="backend"}[1m])) by (le)
+                )
+              comparator:
+                criteria: <=
+                value: "0.5"   # SLO: p95 <= 500ms even under CPU stress
